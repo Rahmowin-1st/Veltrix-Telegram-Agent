@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.config import Settings
+from app.security.policy import evaluate_action
+from app.telegram.mtproto_client import MTProtoClient
+from app.tools.confirm import ConfirmationManager
+
+
+class TelegramWriteTools:
+    def __init__(self, mt: MTProtoClient, settings: Settings, confirmations: ConfirmationManager):
+        self.mt = mt
+        self.settings = settings
+        self.confirmations = confirmations
+
+    async def _run(self, *, owner_chat_id: int, action: str, args: dict[str, Any], explicit_current_request: bool = True):
+        decision = evaluate_action(
+            action,
+            explicit_current_request=explicit_current_request,
+            require_confirmation=self.settings.require_confirmation,
+        )
+        if decision.requires_confirmation:
+            pending = self.confirmations.create(owner_chat_id, action, args)
+            return {
+                "ok": False,
+                "confirmation_required": True,
+                "token": pending.token,
+                "action": action,
+                "summary": args,
+            }
+        return await self.execute_confirmed(action, args)
+
+    async def execute_confirmed(self, action: str, args: dict[str, Any]):
+        mapping = {
+            "send_message": self.mt.send_message,
+            "edit_message": self.mt.edit_message,
+            "delete_messages": self.mt.delete_messages,
+            "forward_message": self.mt.forward_message,
+            "pin_message": self.mt.pin,
+            "unpin_message": self.mt.unpin,
+            "mark_read": self.mt.mark_read,
+            "archive_chat": self.mt.archive,
+            "mute_chat": self.mt.mute,
+            "unmute_chat": self.mt.unmute,
+            "block_user": self.mt.block,
+            "unblock_user": self.mt.unblock,
+            "add_contact": self.mt.add_contact,
+            "import_contact": self.mt.import_contact,
+            "delete_contact": self.mt.delete_contact,
+            "update_profile": self.mt.update_profile,
+            "set_chat_wallpaper": self.mt.set_chat_wallpaper,
+        }
+        if action not in mapping:
+            raise ValueError(f"Unknown confirmed action: {action}")
+        return await mapping[action](**args)
+
+    async def send_message(self, owner_chat_id: int, peer: str, text: str, reply_to: int | None = None, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="send_message", args={"peer": peer, "text": text, "reply_to": reply_to})
+
+    async def edit_message(self, owner_chat_id: int, peer: str, message_id: int, text: str, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="edit_message", args={"peer": peer, "message_id": message_id, "text": text})
+
+    async def delete_messages(self, owner_chat_id: int, peer: str, message_ids: list[int], revoke: bool = True, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="delete_messages", args={"peer": peer, "message_ids": message_ids, "revoke": revoke})
+
+    async def forward_message(self, owner_chat_id: int, target: str, source: str, message_id: int, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="forward_message", args={"target": target, "source": source, "message_id": message_id})
+
+    async def pin_message(self, owner_chat_id: int, peer: str, message_id: int, notify: bool = False, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="pin_message", args={"peer": peer, "message_id": message_id, "notify": notify})
+
+    async def unpin_message(self, owner_chat_id: int, peer: str, message_id: int | None = None, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="unpin_message", args={"peer": peer, "message_id": message_id})
+
+    async def mark_read(self, owner_chat_id: int, peer: str, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="mark_read", args={"peer": peer})
+
+    async def archive_chat(self, owner_chat_id: int, peer: str, archived: bool = True, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="archive_chat", args={"peer": peer, "archived": archived})
+
+    async def mute_chat(self, owner_chat_id: int, peer: str, minutes: int = 60, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="mute_chat", args={"peer": peer, "minutes": minutes})
+
+    async def unmute_chat(self, owner_chat_id: int, peer: str, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="unmute_chat", args={"peer": peer})
+
+    async def block_user(self, owner_chat_id: int, peer: str, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="block_user", args={"peer": peer})
+
+    async def unblock_user(self, owner_chat_id: int, peer: str, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="unblock_user", args={"peer": peer})
+
+    async def add_contact(self, owner_chat_id: int, peer: str, first_name: str, last_name: str = "", phone: str = "", **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="add_contact", args={"peer": peer, "first_name": first_name, "last_name": last_name, "phone": phone})
+
+    async def import_contact(self, owner_chat_id: int, phone: str, first_name: str, last_name: str = "", **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="import_contact", args={"phone": phone, "first_name": first_name, "last_name": last_name})
+
+    async def delete_contact(self, owner_chat_id: int, peer: str, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="delete_contact", args={"peer": peer})
+
+    async def update_profile(self, owner_chat_id: int, first_name: str | None = None, last_name: str | None = None, about: str | None = None, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="update_profile", args={"first_name": first_name, "last_name": last_name, "about": about})
+
+    async def set_chat_wallpaper(self, owner_chat_id: int, peer: str, wallpaper_id: int, access_hash: int, for_both: bool = False, **_: Any):
+        return await self._run(owner_chat_id=owner_chat_id, action="set_chat_wallpaper", args={"peer": peer, "wallpaper_id": wallpaper_id, "access_hash": access_hash, "for_both": for_both})

@@ -13,6 +13,8 @@ services:
         value: 3.12.7
       - key: ENVIRONMENT
         value: production
+      - key: PUBLIC_BASE_URL
+        value: https://veltrix-telegram-agent.onrender.com
       - key: GEMINI_MODEL
         value: gemini-3.8-flash
       - key: GEMINI_SEARCH_MODEL
@@ -21,6 +23,8 @@ services:
         value: "true"
       - key: AUTO_REPLY_BUSINESS
         value: "false"
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN

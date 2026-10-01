@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     telegram_api_hash: str | None = None
     telegram_session: str | None = None
 
+    public_base_url: str | None = None
+    telegram_webhook_secret: str | None = None
     database_url: str | None = None
 
     auto_reply_business: bool = False
@@ -33,7 +35,15 @@ class Settings(BaseSettings):
     download_max_mb: int = Field(default=25, ge=1, le=100)
     allowed_fetch_schemes: str = "https"
 
-    @field_validator("gemini_api_key", "telegram_bot_token", "telegram_api_hash", "telegram_session", mode="before")
+    @field_validator(
+        "gemini_api_key",
+        "telegram_bot_token",
+        "telegram_api_hash",
+        "telegram_session",
+        "public_base_url",
+        "telegram_webhook_secret",
+        mode="before",
+    )
     @classmethod
     def empty_to_none(cls, value):
         if isinstance(value, str) and not value.strip():
@@ -53,6 +63,10 @@ class Settings(BaseSettings):
         return bool(self.telegram_api_id and self.telegram_api_hash and self.telegram_session)
 
     @property
+    def webhook_ready(self) -> bool:
+        return bool(self.has_bot and self.public_base_url and self.telegram_webhook_secret)
+
+    @property
     def db_url(self) -> str:
         raw = self.database_url or "sqlite+aiosqlite:///./veltrix.db"
         if raw.startswith("postgres://"):
@@ -67,6 +81,7 @@ class Settings(BaseSettings):
             missing.append("GEMINI_API_KEY")
         if not self.has_bot:
             missing.append("TELEGRAM_BOT_TOKEN")
+
         mtproto_missing = []
         if not self.telegram_api_id:
             mtproto_missing.append("TELEGRAM_API_ID")
@@ -74,10 +89,12 @@ class Settings(BaseSettings):
             mtproto_missing.append("TELEGRAM_API_HASH")
         if not self.telegram_session:
             mtproto_missing.append("TELEGRAM_SESSION")
+
         return {
             "environment": self.environment,
             "gemini_ready": self.has_gemini,
             "bot_ready": self.has_bot,
+            "webhook_ready": self.webhook_ready,
             "mtproto_ready": self.has_mtproto,
             "missing_required_for_core": missing,
             "missing_for_full_account_control": mtproto_missing,

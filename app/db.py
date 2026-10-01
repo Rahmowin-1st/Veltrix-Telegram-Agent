@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import Settings
+from app.security.redaction import redact_text
 
 
 class Base(DeclarativeBase):
@@ -31,6 +32,7 @@ class ChatPreference(Base):
 
 class Database:
     def __init__(self, settings: Settings):
+        self.backend = "postgres" if settings.database_url else "sqlite"
         self.engine = create_async_engine(settings.db_url, pool_pre_ping=True)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -41,8 +43,9 @@ class Database:
     async def add_memory(self, chat_id: int, role: str, content: str) -> None:
         if not await self.memory_enabled(chat_id):
             return
+        safe_content = redact_text(content)
         async with self.sessions() as session:
-            session.add(ChatMemory(chat_id=chat_id, role=role, content=content))
+            session.add(ChatMemory(chat_id=chat_id, role=role, content=safe_content))
             await session.commit()
 
     async def get_history(self, chat_id: int, limit: int = 30) -> list[dict[str, str]]:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 HIGH_IMPACT_ACTIONS = {
     "delete_messages",
     "bulk_delete_messages",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from collections import deque
 from typing import Any
 
 from app.config import Settings
@@ -9,10 +11,20 @@ from app.tools.confirm import ConfirmationManager
 
 
 class TelegramWriteTools:
+    ACTION_METHODS = {
+        "send_message": "send_message", "edit_message": "edit_message",
+        "delete_messages": "delete_messages", "forward_message": "forward_message",
+        "pin_message": "pin", "unpin_message": "unpin", "mark_read": "mark_read",
+        "archive_chat": "archive", "mute_chat": "mute", "unmute_chat": "unmute",
+        "block_user": "block", "unblock_user": "unblock", "add_contact": "add_contact",
+        "import_contact": "import_contact", "delete_contact": "delete_contact",
+        "update_profile": "update_profile", "set_chat_wallpaper": "set_chat_wallpaper",
+    }
     def __init__(self, mt: MTProtoClient, settings: Settings, confirmations: ConfirmationManager):
         self.mt = mt
         self.settings = settings
         self.confirmations = confirmations
+        self._write_times: deque[float] = deque()
 
     async def _run(self, *, owner_chat_id: int, action: str, args: dict[str, Any], explicit_current_request: bool = True):
         decision = evaluate_action(
@@ -32,28 +44,15 @@ class TelegramWriteTools:
         return await self.execute_confirmed(action, args)
 
     async def execute_confirmed(self, action: str, args: dict[str, Any]):
-        mapping = {
-            "send_message": self.mt.send_message,
-            "edit_message": self.mt.edit_message,
-            "delete_messages": self.mt.delete_messages,
-            "forward_message": self.mt.forward_message,
-            "pin_message": self.mt.pin,
-            "unpin_message": self.mt.unpin,
-            "mark_read": self.mt.mark_read,
-            "archive_chat": self.mt.archive,
-            "mute_chat": self.mt.mute,
-            "unmute_chat": self.mt.unmute,
-            "block_user": self.mt.block,
-            "unblock_user": self.mt.unblock,
-            "add_contact": self.mt.add_contact,
-            "import_contact": self.mt.import_contact,
-            "delete_contact": self.mt.delete_contact,
-            "update_profile": self.mt.update_profile,
-            "set_chat_wallpaper": self.mt.set_chat_wallpaper,
-        }
-        if action not in mapping:
+        if action not in self.ACTION_METHODS:
             raise ValueError(f"Unknown confirmed action: {action}")
-        return await mapping[action](**args)
+        now = time.monotonic()
+        while self._write_times and self._write_times[0] <= now - 60:
+            self._write_times.popleft()
+        if len(self._write_times) >= self.settings.write_rate_per_minute:
+            raise RuntimeError("Account write rate limit reached; wait one minute before retrying.")
+        self._write_times.append(now)
+        return await getattr(self.mt, self.ACTION_METHODS[action])(**args)
 
     async def send_message(self, owner_chat_id: int, peer: str, text: str, reply_to: int | None = None, **_: Any):
         return await self._run(owner_chat_id=owner_chat_id, action="send_message", args={"peer": peer, "text": text, "reply_to": reply_to})

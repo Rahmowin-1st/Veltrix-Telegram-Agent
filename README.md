@@ -54,7 +54,22 @@ Optional durable memory: DATABASE_URL (Postgres). Without it, local SQLite is us
 7. Store the produced StringSession only as TELEGRAM_SESSION in deployment secrets.
 
 ## Commands
-/start, /help, /status, /tools, /memory on|off|status, /forget, /confirm TOKEN, /cancel
+/start, /help, /status, /whoami, /tools, /memory on|off|status, /forget, /confirm TOKEN, /cancel
+
+Account commands work only in the configured owner's **private bot chat**, without needing Gemini:
+- `/account`: actual connected account identity (phone hidden).
+- `/chats [limit]`: recent chats (1–100).
+- `/messages PEER [limit]`: recent messages; `me`, `@username`, or numeric chat ID.
+- `/search QUERY`: global account message search (20 results).
+- `/contacts [limit]`: contacts (1–100).
+- `/actions`: available mutation names and examples.
+- `/do ACTION JSON`: preview a change; **all direct mutations** need a separate `/confirm TOKEN`.
+
+Example: `/do send_message {"peer":"me","text":"Hello"}` previews a Saved Messages send.
+Confirmation tokens expire after five minutes, are chat-bound and single-use. Restart clears pending tokens.
+`/status` distinguishes configured credentials from an actual MTProto connection and reports owner/account
+alignment only to the owner. It does not test AI provider quota/availability. Group/business chats cannot
+invoke account tools, and model tool dispatch enforces this independently of tool declarations.
 
 ## Local run
 python -m venv .venv

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import json
 import logging
 import secrets
 
@@ -7,10 +9,12 @@ from telegram import Update
 from telegram.ext import Application, TypeHandler
 
 from app.ai.agent import Agent
-from app.ai.gemini_client import GeminiClient
+from app.ai.gemini_client import GeminiClient, GeminiError
 from app.config import Settings
 from app.db import Database
+from app.security.redaction import redact_text
 from app.telegram.business import BusinessBot
+from app.telegram.mtproto_client import MTProtoUnavailable
 from app.tools.confirm import ConfirmationManager
 from app.tools.telegram_write import TelegramWriteTools
 
@@ -22,6 +26,13 @@ HELP_TEXT = """Veltrix Telegram Agent
 /status - setup + connection status
 /whoami - show your Telegram ID and owner status
 /tools - capabilities
+/account - connected account identity (owner private chat)
+/chats [limit] - recent chats, without AI
+/messages PEER [limit] - recent messages; PEER can be me, @username or numeric ID
+/search QUERY - global message search, without AI
+/contacts [limit] - contacts, without AI
+/do ACTION JSON - preview an account change, then /confirm TOKEN
+/actions - action names and examples
 /memory [on|off|status] - per-chat AI memory
 /forget - clear this chat's AI memory
 /confirm TOKEN - confirm protected action
@@ -146,7 +157,7 @@ class TelegramRuntime:
             business_connection_id = getattr(msg, "business_connection_id", None)
             is_business = bool(business_connection_id)
             user_id = update.effective_user.id if update.effective_user else None
-            is_owner = self._is_owner(user_id)
+            is_owner = self._is_owner(user_id) and msg.chat.type == "private" and not is_business
             text = (msg.text or msg.caption or "").strip()
 
             if text.startswith("/") and not is_business:
@@ -171,6 +182,12 @@ class TelegramRuntime:
                 allow_account_tools=allow_account_tools,
             )
             await self._reply(update, response, business_connection_id)
+        except GeminiError:
+            log.warning("AI provider unavailable for update")
+            await self._reply(
+                update, "AI xizmati hozir javob bermadi. Owner account amallari /account, /chats, "
+                "/messages va /do orqali AIsiz ishlaydi.", business_connection_id
+            )
         except Exception:
             log.exception("Update handling failed")
             try:
@@ -194,13 +211,38 @@ class TelegramRuntime:
         if command == "/tools":
             await msg.reply_text(TOOLS_TEXT)
             return
+        if command == "/actions":
+            await msg.reply_text(
+                "Use /do ACTION {JSON}. Every direct change requires /confirm TOKEN within 5 minutes. "
+                "Use /cancel to discard it. Numeric chat IDs, @usernames and me (Saved Messages) are accepted.\n\n"
+                'Examples:\n/do send_message {"peer":"me","text":"Hello"}\n'
+                '/do edit_message {"peer":"me","message_id":123,"text":"Updated"}\n'
+                '/do delete_messages {"peer":"me","message_ids":[123],"revoke":true}\n'
+                '/do archive_chat {"peer":"@username","archived":true}\n'
+                '/do mute_chat {"peer":"@username","minutes":60}\n\n'
+                "Actions: " + ", ".join(self.writes.ACTION_METHODS)
+            )
+            return
         if command == "/status":
             status = self.settings.setup_status()
             status["bot_running"] = self.running
             status["bot_mode"] = self.mode
             status["owner_bound"] = bool(self.settings.owner_telegram_id)
             status["memory_backend"] = self.db.backend
+            status["mtproto_running"] = self.writes.mt.ready
+            status["account_access"] = is_owner and self.writes.mt.ready
+            status["ai_note"] = "Configured only; provider availability is not tested by /status"
+            if is_owner and self.writes.mt.ready:
+                account = await self.writes.mt.me()
+                status["account_id"] = account["id"]
+                status["owner_matches_account"] = account["id"] == self.settings.owner_telegram_id
             await msg.reply_text("\n".join(f"{k}: {v}" for k, v in status.items()))
+            return
+        if command in {"/account", "/chats", "/messages", "/search", "/contacts", "/do"}:
+            if not is_owner:
+                await msg.reply_text("Account tools are available only to the owner in a private bot chat.")
+                return
+            await self._account_command(msg, command, text)
             return
         if command == "/forget":
             count = await self.db.clear_history(msg.chat_id)
@@ -233,11 +275,90 @@ class TelegramRuntime:
             if not pending:
                 await msg.reply_text("Confirmation token invalid or expired.")
                 return
-            result = await self.writes.execute_confirmed(pending.action, pending.arguments)
-            await msg.reply_text(f"Confirmed: {pending.action}\n{result}")
+            try:
+                result = await self.writes.execute_confirmed(pending.action, pending.arguments)
+                await msg.reply_text(f"Confirmed: {pending.action}\n{result}")
+            except Exception as exc:
+                log.warning("Confirmed action %s failed (%s)", pending.action, type(exc).__name__)
+                await msg.reply_text(
+                    f"Action failed: {type(exc).__name__}. Token consumed; no automatic retry. Check /status."
+                )
             return
 
         await msg.reply_text("Unknown command. /help")
+
+    @staticmethod
+    def _peer(value: str) -> str | int:
+        return int(value) if value.lstrip("-").isdigit() else value
+
+    @staticmethod
+    async def _account_result(msg, result) -> None:
+        # Bound output without silently cutting a record in the middle.
+        records = result if isinstance(result, list) else [result]
+        page = ""
+        pages = 0
+        for index, record in enumerate(records):
+            line = redact_text(json.dumps(record, ensure_ascii=False, default=str))
+            if len(line) > 3500:
+                line = line[:3450] + " ... [record truncated]"
+            if page and len(page) + len(line) + 1 > 3500:
+                await msg.reply_text(page)
+                pages += 1
+                page = ""
+                if pages >= 4:
+                    await msg.reply_text(f"Output limited; {len(records) - index} remaining. Use a smaller limit/query.")
+                    return
+            page += ("\n" if page else "") + line
+        await msg.reply_text(page or "No results.")
+
+    async def _account_command(self, msg, command: str, text: str) -> None:
+        if not self.writes.mt.ready:
+            await msg.reply_text("MTProto is disconnected. /status")
+            return
+        parts = text.split()
+        try:
+            if command == "/account":
+                result = await self.writes.mt.me()
+            elif command == "/chats":
+                limit = max(1, min(int(parts[1]) if len(parts) > 1 else 20, 100))
+                result = await self.writes.mt.list_dialogs(limit)
+            elif command == "/contacts":
+                limit = max(1, min(int(parts[1]) if len(parts) > 1 else 20, 100))
+                result = (await self.writes.mt.contacts())[:limit]
+            elif command == "/messages":
+                if len(parts) < 2:
+                    raise ValueError("Usage: /messages PEER [limit]")
+                limit = max(1, min(int(parts[2]) if len(parts) > 2 else 10, 100))
+                result = await self.writes.mt.recent_messages(self._peer(parts[1]), limit)
+            elif command == "/search":
+                query = text.partition(" ")[2].strip()
+                if not query:
+                    raise ValueError("Usage: /search QUERY")
+                result = await self.writes.mt.global_search(query, 20)
+            else:
+                action_parts = text.split(maxsplit=2)
+                if len(action_parts) != 3 or action_parts[1] not in self.writes.ACTION_METHODS:
+                    raise ValueError("Usage: /do ACTION JSON. See /actions for examples.")
+                action = action_parts[1]
+                args = json.loads(action_parts[2])
+                if not isinstance(args, dict):
+                    raise ValueError("JSON must be an object.")
+                for key in ("peer", "target", "source"):
+                    if isinstance(args.get(key), str):
+                        args[key] = self._peer(args[key])
+                method = getattr(self.writes.mt, self.writes.ACTION_METHODS[action])
+                inspect.signature(method).bind(**args)
+                pending = self.confirmations.create(msg.chat_id, action, args)
+                result = {"confirmation_required": True, "action": action, "arguments": args,
+                          "confirm": f"/confirm {pending.token}", "expires_in_seconds": self.confirmations.ttl_seconds}
+            await self._account_result(msg, result)
+        except (ValueError, TypeError):
+            await msg.reply_text("Invalid arguments. /help or /actions for syntax. No account change was made.")
+        except MTProtoUnavailable:
+            await msg.reply_text("MTProto is disconnected. /status")
+        except Exception as exc:
+            log.warning("Direct account command %s failed (%s)", command, type(exc).__name__)
+            await msg.reply_text(f"Telegram action failed: {type(exc).__name__}. No automatic retry; check /status.")
 
     async def _understand_media(self, msg) -> str:
         tg_file = None

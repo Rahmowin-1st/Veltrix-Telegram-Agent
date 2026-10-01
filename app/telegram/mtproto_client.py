@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from telethon import TelegramClient, functions, types
@@ -191,7 +191,7 @@ class MTProtoClient:
     async def mute(self, peer: Any, minutes: int = 60) -> dict[str, Any]:
         client = self._require()
         entity = await client.get_input_entity(peer)
-        until = datetime.now(timezone.utc) + timedelta(minutes=max(1, min(minutes, 525600)))
+        until = datetime.now(UTC) + timedelta(minutes=max(1, min(minutes, 525600)))
         settings = types.InputPeerNotifySettings(mute_until=until)
         await client(functions.account.UpdateNotifySettingsRequest(peer=types.InputNotifyPeer(entity), settings=settings))
         return {"ok": True, "mute_until": until.isoformat()}
@@ -199,7 +199,7 @@ class MTProtoClient:
     async def unmute(self, peer: Any) -> dict[str, Any]:
         client = self._require()
         entity = await client.get_input_entity(peer)
-        settings = types.InputPeerNotifySettings(mute_until=datetime.fromtimestamp(0, timezone.utc))
+        settings = types.InputPeerNotifySettings(mute_until=datetime.fromtimestamp(0, UTC))
         await client(functions.account.UpdateNotifySettingsRequest(peer=types.InputNotifyPeer(entity), settings=settings))
         return {"ok": True}
 

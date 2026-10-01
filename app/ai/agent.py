@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from app.ai.gemini_client import GeminiClient
 from app.ai.prompts import SYSTEM_PROMPT
@@ -17,6 +18,7 @@ from app.tools.web_tools import fetch_public_url, platform_query
 log = logging.getLogger(__name__)
 
 ToolFunc = Callable[..., Awaitable[Any]]
+PUBLIC_TOOLS = frozenset({"web_search", "fetch_url", "download_media"})
 
 
 class Agent:
@@ -78,7 +80,12 @@ class Agent:
     async def _download_media(self, url: str, **_: Any):
         return await download_public_media(url, max_mb=self.settings.download_max_mb)
 
-    async def _execute_tool(self, name: str, args: dict[str, Any], owner_chat_id: int) -> Any:
+    async def _execute_tool(
+        self, name: str, args: dict[str, Any], owner_chat_id: int, *, allow_account_tools: bool = False
+    ) -> Any:
+        # Enforce authority at dispatch, not just in the declarations sent to the model.
+        if name not in PUBLIC_TOOLS and not allow_account_tools:
+            return {"error": "AccountAccessDenied"}
         tool = self.tool_map.get(name)
         if not tool:
             return {"error": "UnknownTool"}
@@ -110,7 +117,7 @@ class Agent:
         await self.db.add_memory(chat_id, "user", text)
 
         declarations = TOOL_DECLARATIONS if allow_account_tools else [
-            d for d in TOOL_DECLARATIONS if d["name"] in {"web_search", "fetch_url", "download_media"}
+            d for d in TOOL_DECLARATIONS if d["name"] in PUBLIC_TOOLS
         ]
 
         final_text = ""
@@ -131,7 +138,9 @@ class Agent:
 
             response_parts = []
             for call in calls:
-                result = await self._execute_tool(call["name"], call["args"], chat_id)
+                result = await self._execute_tool(
+                    call["name"], call["args"], chat_id, allow_account_tools=allow_account_tools
+                )
                 response_parts.append({
                     "functionResponse": {
                         "name": call["name"],

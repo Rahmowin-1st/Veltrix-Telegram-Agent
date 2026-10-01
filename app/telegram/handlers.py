@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 
 from telegram import Update
 from telegram.ext import Application, TypeHandler
@@ -19,6 +20,7 @@ HELP_TEXT = """Veltrix Telegram Agent
 
 /start - start
 /status - setup + connection status
+/whoami - show your Telegram ID and owner status
 /tools - capabilities
 /memory [on|off|status] - per-chat AI memory
 /forget - clear this chat's AI memory
@@ -57,6 +59,7 @@ class TelegramRuntime:
         self.confirmations = confirmations
         self.writes = writes
         self.application: Application | None = None
+        self.mode = "disabled"
 
     @property
     def running(self) -> bool:
@@ -65,24 +68,55 @@ class TelegramRuntime:
     async def start(self) -> None:
         if not self.settings.telegram_bot_token:
             log.info("Bot API disabled: TELEGRAM_BOT_TOKEN missing")
+            self.mode = "disabled"
             return
+
         self.application = Application.builder().token(self.settings.telegram_bot_token).build()
         self.application.add_handler(TypeHandler(Update, self.handle_update))
         await self.application.initialize()
         await self.application.start()
+
+        if self.settings.webhook_ready:
+            self.mode = "webhook"
+            url = self.settings.public_base_url.rstrip("/") + "/telegram/webhook"
+            await self.application.bot.set_webhook(
+                url=url,
+                secret_token=self.settings.telegram_webhook_secret,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+            )
+            log.info("Telegram Bot API webhook configured")
+            return
+
         if not self.application.updater:
             raise RuntimeError("Telegram updater unavailable")
-        await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+        self.mode = "polling"
+        await self.application.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=False,
+        )
         log.info("Telegram Bot API polling started")
 
     async def stop(self) -> None:
         if not self.application:
             return
-        if self.application.updater:
+        if self.application.updater and self.application.updater.running:
             await self.application.updater.stop()
         await self.application.stop()
         await self.application.shutdown()
         self.application = None
+        self.mode = "disabled"
+
+    def valid_webhook_secret(self, supplied: str | None) -> bool:
+        expected = self.settings.telegram_webhook_secret
+        return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
+    async def process_webhook(self, payload: dict) -> None:
+        if not self.application or not self.application.running:
+            raise RuntimeError("Telegram application is not running")
+        update = Update.de_json(payload, self.application.bot)
+        if update is not None:
+            await self.application.process_update(update)
 
     def _is_owner(self, user_id: int | None) -> bool:
         return bool(user_id and self.settings.owner_telegram_id and user_id == self.settings.owner_telegram_id)
@@ -108,6 +142,7 @@ class TelegramRuntime:
             msg = update.effective_message
             if not msg:
                 return
+
             business_connection_id = getattr(msg, "business_connection_id", None)
             is_business = bool(business_connection_id)
             user_id = update.effective_user.id if update.effective_user else None
@@ -129,14 +164,17 @@ class TelegramRuntime:
             if not prompt:
                 prompt = "Respond appropriately to the attached media."
 
-            # Owner account tools never leak into arbitrary bot/business chats.
             allow_account_tools = is_owner and not is_business
-            response = await self.agent.chat(chat_id=msg.chat_id, text=prompt, allow_account_tools=allow_account_tools)
+            response = await self.agent.chat(
+                chat_id=msg.chat_id,
+                text=prompt,
+                allow_account_tools=allow_account_tools,
+            )
             await self._reply(update, response, business_connection_id)
-        except Exception as exc:
+        except Exception:
             log.exception("Update handling failed")
             try:
-                await self._reply(update, f"Xatolik: {type(exc).__name__}: {exc}")
+                await self._reply(update, "Ichki xatolik yuz berdi. /status orqali holatni tekshiring.")
             except Exception:
                 pass
 
@@ -149,13 +187,19 @@ class TelegramRuntime:
         if command in {"/start", "/help"}:
             await msg.reply_text(HELP_TEXT)
             return
+        if command == "/whoami":
+            user_id = update.effective_user.id if update.effective_user else None
+            await msg.reply_text(f"Telegram ID: {user_id}\nOwner: {'YES' if is_owner else 'NO'}")
+            return
         if command == "/tools":
             await msg.reply_text(TOOLS_TEXT)
             return
         if command == "/status":
             status = self.settings.setup_status()
-            status["bot_polling"] = self.running
+            status["bot_running"] = self.running
+            status["bot_mode"] = self.mode
             status["owner_bound"] = bool(self.settings.owner_telegram_id)
+            status["memory_backend"] = self.db.backend
             await msg.reply_text("\n".join(f"{k}: {v}" for k, v in status.items()))
             return
         if command == "/forget":
@@ -192,21 +236,27 @@ class TelegramRuntime:
             result = await self.writes.execute_confirmed(pending.action, pending.arguments)
             await msg.reply_text(f"Confirmed: {pending.action}\n{result}")
             return
+
         await msg.reply_text("Unknown command. /help")
 
     async def _understand_media(self, msg) -> str:
         tg_file = None
         mime = "application/octet-stream"
         if msg.voice:
-            tg_file = await msg.voice.get_file(); mime = msg.voice.mime_type or "audio/ogg"
+            tg_file = await msg.voice.get_file()
+            mime = msg.voice.mime_type or "audio/ogg"
         elif msg.audio:
-            tg_file = await msg.audio.get_file(); mime = msg.audio.mime_type or "audio/mpeg"
+            tg_file = await msg.audio.get_file()
+            mime = msg.audio.mime_type or "audio/mpeg"
         elif msg.video:
-            tg_file = await msg.video.get_file(); mime = msg.video.mime_type or "video/mp4"
+            tg_file = await msg.video.get_file()
+            mime = msg.video.mime_type or "video/mp4"
         elif msg.document:
-            tg_file = await msg.document.get_file(); mime = msg.document.mime_type or mime
+            tg_file = await msg.document.get_file()
+            mime = msg.document.mime_type or mime
         elif msg.photo:
-            tg_file = await msg.photo[-1].get_file(); mime = "image/jpeg"
+            tg_file = await msg.photo[-1].get_file()
+            mime = "image/jpeg"
         if not tg_file:
             return ""
         data = bytes(await tg_file.download_as_bytearray())

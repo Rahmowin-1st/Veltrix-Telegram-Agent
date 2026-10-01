@@ -81,7 +81,7 @@ class Agent:
     async def _execute_tool(self, name: str, args: dict[str, Any], owner_chat_id: int) -> Any:
         tool = self.tool_map.get(name)
         if not tool:
-            return {"error": f"Unknown tool: {name}"}
+            return {"error": "UnknownTool"}
         if name in {
             "send_message", "edit_message", "delete_messages", "forward_message", "pin_message", "unpin_message",
             "mark_read", "archive_chat", "mute_chat", "unmute_chat", "block_user", "unblock_user", "add_contact",
@@ -94,7 +94,7 @@ class Agent:
             return {"error": str(exc), "needs_mtproto": True}
         except Exception as exc:
             log.exception("Tool %s failed", name)
-            return {"error": f"{type(exc).__name__}: {exc}"}
+            return {"error": type(exc).__name__, "message": "Tool failed; check server diagnostics."}
 
     async def chat(self, *, chat_id: int, text: str, allow_account_tools: bool) -> str:
         if not self.gemini.ready:

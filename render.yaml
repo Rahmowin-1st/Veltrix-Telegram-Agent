@@ -2,7 +2,7 @@ services:
   - type: web
     name: veltrix-telegram-agent
     runtime: python
-    plan: starter
+    plan: free
     region: frankfurt
     autoDeploy: true
     buildCommand: pip install -r requirements.txt

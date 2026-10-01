@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 
@@ -23,8 +23,10 @@ async def health(request: Request):
         "gemini": state.settings.has_gemini,
         "bot_configured": state.settings.has_bot,
         "bot_running": state.telegram.running,
+        "bot_mode": state.telegram.mode,
         "mtproto_configured": state.settings.has_mtproto,
         "mtproto_running": state.mtproto.ready,
+        "memory_backend": state.db.backend,
     }
 
 
@@ -35,6 +37,19 @@ async def setup_status(request: Request):
     status.update({
         "owner_bound": bool(state.settings.owner_telegram_id),
         "bot_running": state.telegram.running,
+        "bot_mode": state.telegram.mode,
         "mtproto_running": state.mtproto.ready,
+        "memory_backend": state.db.backend,
     })
     return status
+
+
+@router.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    state = request.app.state.runtime
+    secret = request.headers.get("x-telegram-bot-api-secret-token")
+    if not state.telegram.valid_webhook_secret(secret):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    payload = await request.json()
+    await state.telegram.process_webhook(payload)
+    return {"ok": True}

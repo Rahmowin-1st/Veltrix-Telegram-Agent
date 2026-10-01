@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: veltrix-telegram-agent
+    runtime: python
+    plan: starter
+    region: frankfurt
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: ENVIRONMENT
+        value: production
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_SEARCH_MODEL
+        value: gemini-3.8-flash
+      - key: REQUIRE_CONFIRMATION
+        value: "true"
+      - key: AUTO_REPLY_BUSINESS
+        value: "false"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_ID
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_SESSION
+        sync: false
+      - key: DATABASE_URL
+        sync: false

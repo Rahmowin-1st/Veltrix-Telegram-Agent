@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.ai.extended_schemas import EXTENDED_DECLARATIONS
+
 TOOL_DECLARATIONS = [
     {
         "name": "account_info",
@@ -252,3 +254,5 @@ TOOL_DECLARATIONS = [
         },
     },
 ]
+
+TOOL_DECLARATIONS.extend(EXTENDED_DECLARATIONS)

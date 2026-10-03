@@ -53,7 +53,41 @@ Optional durable memory: DATABASE_URL (Postgres). Without it, local SQLite is us
 6. Run: python scripts/create_telegram_session.py on a trusted local device.
 7. Store the produced StringSession only as TELEGRAM_SESSION in deployment secrets.
 
-## Commands
+## Natural-language account agent
+
+Normal use is natural speech, not `/do` or JSON. The model performs function calls internally and
+returns only a concise result. Examples (not automatic background tasks):
+
+- “Admin menga yuborgan oxirgi musiqani Savedga tashla va music deb tag qil.”
+- “Shu xabarimga bot sifatida 👍 reaction bos.”
+- “Falona kanaldagi oxirgi postga mening akkauntimdan ❤️ bos.”
+- “Bu stiker packni qo‘shib qo‘y.”
+- “Kanaldagi huquqlarimni tekshir, tavsifini mana bunday yangila.”
+- “Savedga Markdown formatida haftalik kreativ kontent reja yubor.”
+
+The agent resolves local contact/dialog names, filters incoming music separately from voice notes,
+forwards media to Saved Messages, and uses **native Premium reaction tags**, not fake hashtag labels.
+It will ask if multiple contacts match. Partial success (saved but tagging failed) is reported without
+re-forwarding. Bot reactions are bound to the current user message server-side; user-account
+reactions use MTProto message IDs. Paid reactions are not supported or purchased.
+
+Channel tools include join/leave/create, information/members, title/about, admin rights and ban/unban,
+subject to existing Telegram permissions. Sticker tools include installed packs, inspect/install/remove,
+send/favorite, and create/add to personal packs **from existing sticker messages**. Creative UTF-8
+txt/md/csv/json/svg/html files can be sent; arbitrary code execution and arbitrary server file reads are
+not exposed. This is a broad supported toolset, **not a claim that every Telegram API method is available**.
+
+Protected actions show human-readable confirmation buttons; “tasdiqlayman” works only when exactly one
+pending action exists. Tokens remain private, chat-bound, expiring and single-use. Other users, business
+chats and groups cannot access the owner's account. High-impact confirmation cannot be disabled by
+setting REQUIRE_CONFIRMATION=false. Gemini thought signatures/call IDs are retained internally; thinking
+text/intermediate tools are not sent to the user. Permanent provider errors are not repeatedly retried.
+
+The user client identifies itself as `Veltrix Telegram Agent`; the local login helper as
+`Veltrix Session Setup`. Render deployments in Frankfurt can appear as Germany in Telegram devices.
+Location alone does not prove a session is trusted. Revoked sessions are not silently logged in again.
+
+## Optional diagnostic commands
 /start, /help, /status, /whoami, /tools, /memory on|off|status, /forget, /confirm TOKEN, /cancel
 
 Account commands work only in the configured owner's **private bot chat**, without needing Gemini:

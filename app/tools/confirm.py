@@ -41,6 +41,10 @@ class ConfirmationManager:
             self._pending.pop(token, None)
         return len(tokens)
 
+    def for_chat(self, chat_id: int) -> list[PendingAction]:
+        self._prune()
+        return [item for item in self._pending.values() if item.chat_id == chat_id]
+
     def _prune(self) -> None:
         now = time.time()
         for token, item in list(self._pending.items()):

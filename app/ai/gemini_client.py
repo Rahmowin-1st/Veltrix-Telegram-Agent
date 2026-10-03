@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import Settings
 
@@ -13,6 +13,12 @@ log = logging.getLogger(__name__)
 
 
 class GeminiError(RuntimeError):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GeminiTransientError(GeminiError):
     pass
 
 
@@ -22,6 +28,7 @@ class GeminiClient:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15))
+        self.last_http_status: int | None = None
 
     @property
     def ready(self) -> bool:
@@ -35,13 +42,26 @@ class GeminiClient:
             "content-type": "application/json",
         }
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.7, min=0.7, max=6), reraise=True)
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.7, min=0.7, max=6),
+        retry=retry_if_exception_type((httpx.TransportError, GeminiTransientError)),
+        reraise=True,
+    )
     async def _post(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.BASE_URL}/{model}:generateContent"
         response = await self.client.post(url, headers=self._headers(), json=payload)
+        self.last_http_status = response.status_code
         if response.status_code >= 400:
-            body = response.text[:1000]
-            raise GeminiError(f"Gemini HTTP {response.status_code}: {body}")
+            # Provider error bodies may contain request details. Do not echo or log them.
+            error = (
+                GeminiTransientError
+                if response.status_code == 429 or response.status_code >= 500
+                else GeminiError
+            )
+            raise error(
+                f"AI provider HTTP {response.status_code}", status_code=response.status_code
+            )
         return response.json()
 
     async def agent_turn(
@@ -74,13 +94,20 @@ class GeminiClient:
 
     async def understand_media(self, *, data: bytes, mime_type: str, instruction: str) -> str:
         payload = {
-            "contents": [{
-                "role": "user",
-                "parts": [
-                    {"text": instruction},
-                    {"inlineData": {"mimeType": mime_type, "data": base64.b64encode(data).decode("ascii")}},
-                ],
-            }],
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": instruction},
+                        {
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": base64.b64encode(data).decode("ascii"),
+                            }
+                        },
+                    ],
+                }
+            ],
             "generationConfig": {"temperature": 0.15, "maxOutputTokens": 3000},
         }
         result = await self._post(self.settings.gemini_model, payload)
@@ -95,7 +122,11 @@ class GeminiClient:
 
     @classmethod
     def extract_text(cls, data: dict[str, Any]) -> str:
-        chunks = [p.get("text", "") for p in cls.candidate_parts(data) if p.get("text")]
+        chunks = [
+            p.get("text", "")
+            for p in cls.candidate_parts(data)
+            if p.get("text") and not p.get("thought")
+        ]
         return "\n".join(chunks).strip()
 
     @classmethod
@@ -104,7 +135,9 @@ class GeminiClient:
         for part in cls.candidate_parts(data):
             call = part.get("functionCall")
             if call:
-                out.append({"name": call.get("name"), "args": call.get("args") or {}})
+                out.append(
+                    {"name": call.get("name"), "args": call.get("args") or {}, "id": call.get("id")}
+                )
         return out
 
     @staticmethod

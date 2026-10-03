@@ -99,6 +99,7 @@ async def test_ai_dispatch_refuses_hidden_account_tools():
     agent = Agent.__new__(Agent)
     tool = AsyncMock(return_value={"id": 42})
     agent.tool_map = {"account_info": tool}
+    agent.writes = SimpleNamespace(ACTION_METHODS={})
     result = await agent._execute_tool("account_info", {}, 99, allow_account_tools=False)
     assert result == {"error": "AccountAccessDenied"}
     tool.assert_not_awaited()

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     auto_reply_business: bool = False
     require_confirmation: bool = True
     max_history_messages: int = Field(default=30, ge=5, le=100)
-    max_agent_steps: int = Field(default=8, ge=1, le=16)
+    max_agent_steps: int = Field(default=12, ge=1, le=16)
     write_rate_per_minute: int = Field(default=20, ge=1, le=120)
     download_max_mb: int = Field(default=25, ge=1, le=100)
     allowed_fetch_schemes: str = "https"

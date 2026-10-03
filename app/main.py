@@ -46,6 +46,7 @@ def build_runtime() -> Runtime:
     writes = TelegramWriteTools(mtproto, settings, confirmations)
     agent = Agent(settings, db, gemini, reads, writes)
     telegram = TelegramRuntime(settings, db, gemini, agent, confirmations, writes)
+    agent.bot_reactor = telegram.react_to_message
     return Runtime(settings, db, gemini, mtproto, confirmations, reads, writes, agent, telegram)
 
 

@@ -5,7 +5,13 @@ import json
 import logging
 import secrets
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReactionTypeCustomEmoji,
+    ReactionTypeEmoji,
+    Update,
+)
 from telegram.ext import Application, TypeHandler
 
 from app.ai.agent import Agent
@@ -21,6 +27,11 @@ from app.tools.telegram_write import TelegramWriteTools
 log = logging.getLogger(__name__)
 
 HELP_TEXT = """Veltrix Telegram Agent
+
+Oddiy gap bilan topshiriq bering: “Admin yuborgan oxirgi musiqani Savedga saqla va music teg qo‘y”.
+Kontakt/chat topish, media, reaksiyalar, kanal va stiker amallari AI function calling orqali ichkarida bajariladi.
+Xavfli amallar uchun Tasdiqlash tugmasi chiqadi yoki “tasdiqlayman” deb yozishingiz mumkin.
+Quyidagi buyruqlar faqat qo‘shimcha diagnostika/manual yo‘l:
 
 /start - start
 /status - setup + connection status
@@ -49,6 +60,12 @@ TOOLS_TEXT = """Main tools:
 • send/edit/forward/pin/read/archive/mute
 • protected profile/contact/block/delete actions
 • per-chat wallpaper via MTProto when Telegram schema supports it
+• natural-language contact/dialog name resolution + latest incoming media
+• real Premium Saved Messages tags + user/custom emoji reactions
+• bot reactions on the user's current message
+• join/create/manage channels subject to actual rights
+• install/favorite/send stickers + personal packs from existing stickers
+• creative UTF-8 files + existing media with captions
 • Telegram Business connected-chat replies
 """.strip()
 
@@ -130,9 +147,19 @@ class TelegramRuntime:
             await self.application.process_update(update)
 
     def _is_owner(self, user_id: int | None) -> bool:
-        return bool(user_id and self.settings.owner_telegram_id and user_id == self.settings.owner_telegram_id)
+        return bool(
+            user_id
+            and self.settings.owner_telegram_id
+            and user_id == self.settings.owner_telegram_id
+        )
 
-    async def _reply(self, update: Update, text: str, business_connection_id: str | None = None) -> None:
+    async def _reply(
+        self,
+        update: Update,
+        text: str,
+        business_connection_id: str | None = None,
+        reply_markup=None,
+    ) -> None:
         msg = update.effective_message
         if not msg:
             return
@@ -141,10 +168,85 @@ class TelegramRuntime:
                 msg.chat_id, text[:4000], business_connection_id, reply_to=msg.message_id
             )
         else:
-            await msg.reply_text(text[:4000])
+            await msg.reply_text(text[:4000], reply_markup=reply_markup)
+
+    async def react_to_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        emoji: str | None = None,
+        custom_emoji_id: str | None = None,
+        remove: bool = False,
+    ):
+        if not self.application or not self.running:
+            return {"ok": False, "error": "BotNotRunning"}
+        if not remove and bool(emoji) == bool(custom_emoji_id):
+            return {"ok": False, "error": "ChooseOneReaction"}
+        try:
+            reactions = (
+                []
+                if remove
+                else [
+                    ReactionTypeCustomEmoji(custom_emoji_id)
+                    if custom_emoji_id
+                    else ReactionTypeEmoji(emoji)
+                ]
+            )
+            await self.application.bot.set_message_reaction(
+                chat_id=chat_id, message_id=message_id, reaction=reactions
+            )
+            return {"ok": True, "actor": "bot", "removed": remove}
+        except Exception as exc:
+            log.warning("Bot reaction failed (%s)", type(exc).__name__)
+            return {
+                "ok": False,
+                "error": type(exc).__name__,
+                "message": "Telegram did not allow this bot reaction.",
+            }
+
+    async def _confirmation_callback(self, query) -> None:
+        msg = query.message
+        if not msg or msg.chat.type != "private" or not self._is_owner(query.from_user.id):
+            await query.answer("Faqat owner tasdiqlashi mumkin.", show_alert=True)
+            return
+        parts = (query.data or "").split(":", 1)
+        if len(parts) != 2 or parts[0] not in {"confirm", "cancel"}:
+            await query.answer("Noma’lum amal.")
+            return
+        pending = self.confirmations.consume(msg.chat_id, parts[1])
+        if not pending:
+            await query.answer(
+                "Tasdiqlash muddati tugagan yoki allaqachon ishlatilgan.", show_alert=True
+            )
+            return
+        await query.answer()
+        if parts[0] == "cancel":
+            await query.edit_message_text("Amal bekor qilindi.")
+            return
+        try:
+            result = await self.writes.execute_confirmed(pending.action, pending.arguments)
+            outcome = (
+                "Tasdiqlangan amal bajarildi."
+                if not isinstance(result, dict) or result.get("ok", True)
+                else "Amal to‘liq tugamadi. Bajarilgan qismlar avtomatik takrorlanmaydi."
+            )
+        except Exception as exc:
+            log.warning("Confirmed action %s failed (%s)", pending.action, type(exc).__name__)
+            outcome = (
+                "Amal yakunlangani tasdiqlanmadi. Avtomatik takrorlanmadi; holatni tekshiring."
+            )
+        # A reply-edit failure must never re-execute an already consumed action or
+        # misreport a successful mutation as a failed Telegram operation.
+        try:
+            await query.edit_message_text(outcome)
+        except Exception as exc:
+            log.warning("Confirmation reply failed (%s)", type(exc).__name__)
 
     async def handle_update(self, update: Update, _context) -> None:
         try:
+            if getattr(update, "callback_query", None):
+                await self._confirmation_callback(update.callback_query)
+                return
             if getattr(update, "business_connection", None):
                 c = update.business_connection
                 log.info("Business connection update id=%s", getattr(c, "id", None))
@@ -160,6 +262,23 @@ class TelegramRuntime:
             is_owner = self._is_owner(user_id) and msg.chat.type == "private" and not is_business
             text = (msg.text or msg.caption or "").strip()
 
+            if is_owner and text.casefold() in {
+                "tasdiqlayman",
+                "ha tasdiqlayman",
+                "ha, tasdiqlayman",
+                "confirm",
+            }:
+                pending = self.confirmations.for_chat(msg.chat_id)
+                if len(pending) != 1:
+                    await msg.reply_text(
+                        "Bitta aniq amal tanlanmadi. Kerakli Tasdiqlash tugmasini bosing."
+                    )
+                    return
+                await self._handle_command(
+                    update, f"/confirm {pending[0].token}", True, natural=True
+                )
+                return
+
             if text.startswith("/") and not is_business:
                 await self._handle_command(update, text, is_owner)
                 return
@@ -168,34 +287,67 @@ class TelegramRuntime:
 
             media_note = ""
             if msg.voice or msg.audio or msg.photo or msg.document or msg.video:
-                media_note = await self._understand_media(msg) if self.gemini.ready else "[Media attached]"
+                media_note = (
+                    await self._understand_media(msg) if self.gemini.ready else "[Media attached]"
+                )
             prompt = text
             if media_note:
                 prompt = (text + "\n\nAttached media understanding:\n" + media_note).strip()
+            sticker = getattr(msg, "sticker", None)
+            if sticker:
+                prompt += f"\nAttached sticker metadata: set_name={sticker.set_name}, emoji={sticker.emoji}."
             if not prompt:
                 prompt = "Respond appropriately to the attached media."
 
             allow_account_tools = is_owner and not is_business
+            previous_tokens = {p.token for p in self.confirmations.for_chat(msg.chat_id)}
             response = await self.agent.chat(
                 chat_id=msg.chat_id,
                 text=prompt,
                 allow_account_tools=allow_account_tools,
+                message_id=getattr(msg, "message_id", None) if not is_business else None,
             )
-            await self._reply(update, response, business_connection_id)
-        except GeminiError:
-            log.warning("AI provider unavailable for update")
+            pending = [
+                p
+                for p in self.confirmations.for_chat(msg.chat_id)
+                if p.token not in previous_tokens
+            ]
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        "Tasdiqlash" if len(pending) == 1 else f"Tasdiqlash ({i + 1})",
+                        callback_data=f"confirm:{p.token}",
+                    ),
+                    InlineKeyboardButton("Bekor qilish", callback_data=f"cancel:{p.token}"),
+                ]
+                for i, p in enumerate(pending[:5])
+            ]
             await self._reply(
-                update, "AI xizmati hozir javob bermadi. Owner account amallari /account, /chats, "
-                "/messages va /do orqali AIsiz ishlaydi.", business_connection_id
+                update,
+                response,
+                business_connection_id,
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+        except GeminiError as exc:
+            log.warning("AI provider unavailable status=%s", exc.status_code)
+            await self._reply(
+                update,
+                "AI xizmati hozir javob bermadi. Men bu topshiriq bajarildi deb aytmayman. "
+                "Account ulanishi alohida ishlayapti; AI sozlamasi/kvotasi tekshirilishi kerak.",
+                business_connection_id,
             )
         except Exception:
             log.exception("Update handling failed")
             try:
-                await self._reply(update, "Ichki xatolik yuz berdi. /status orqali holatni tekshiring.")
+                await self._reply(
+                    update, "Ichki xatolik yuz berdi. /status orqali holatni tekshiring."
+                )
             except Exception:
                 pass
 
-    async def _handle_command(self, update: Update, text: str, is_owner: bool) -> None:
+    async def _handle_command(
+        self, update: Update, text: str, is_owner: bool, *, natural: bool = False
+    ) -> None:
         msg = update.effective_message
         assert msg is not None
         parts = text.split()
@@ -232,6 +384,7 @@ class TelegramRuntime:
             status["mtproto_running"] = self.writes.mt.ready
             status["account_access"] = is_owner and self.writes.mt.ready
             status["ai_note"] = "Configured only; provider availability is not tested by /status"
+            status["ai_last_http_status"] = getattr(self.gemini, "last_http_status", None)
             if is_owner and self.writes.mt.ready:
                 account = await self.writes.mt.me()
                 status["account_id"] = account["id"]
@@ -240,7 +393,9 @@ class TelegramRuntime:
             return
         if command in {"/account", "/chats", "/messages", "/search", "/contacts", "/do"}:
             if not is_owner:
-                await msg.reply_text("Account tools are available only to the owner in a private bot chat.")
+                await msg.reply_text(
+                    "Account tools are available only to the owner in a private bot chat."
+                )
                 return
             await self._account_command(msg, command, text)
             return
@@ -277,7 +432,14 @@ class TelegramRuntime:
                 return
             try:
                 result = await self.writes.execute_confirmed(pending.action, pending.arguments)
-                await msg.reply_text(f"Confirmed: {pending.action}\n{result}")
+                if natural:
+                    await msg.reply_text(
+                        "Tasdiqlangan amal bajarildi."
+                        if not isinstance(result, dict) or result.get("ok", True)
+                        else "Telegram amalni bajarmadi. Cheklov/huquqlarni tekshiring."
+                    )
+                else:
+                    await msg.reply_text(f"Confirmed: {pending.action}\n{result}")
             except Exception as exc:
                 log.warning("Confirmed action %s failed (%s)", pending.action, type(exc).__name__)
                 await msg.reply_text(
@@ -306,7 +468,9 @@ class TelegramRuntime:
                 pages += 1
                 page = ""
                 if pages >= 4:
-                    await msg.reply_text(f"Output limited; {len(records) - index} remaining. Use a smaller limit/query.")
+                    await msg.reply_text(
+                        f"Output limited; {len(records) - index} remaining. Use a smaller limit/query."
+                    )
                     return
             page += ("\n" if page else "") + line
         await msg.reply_text(page or "No results.")
@@ -349,16 +513,25 @@ class TelegramRuntime:
                 method = getattr(self.writes.mt, self.writes.ACTION_METHODS[action])
                 inspect.signature(method).bind(**args)
                 pending = self.confirmations.create(msg.chat_id, action, args)
-                result = {"confirmation_required": True, "action": action, "arguments": args,
-                          "confirm": f"/confirm {pending.token}", "expires_in_seconds": self.confirmations.ttl_seconds}
+                result = {
+                    "confirmation_required": True,
+                    "action": action,
+                    "arguments": args,
+                    "confirm": f"/confirm {pending.token}",
+                    "expires_in_seconds": self.confirmations.ttl_seconds,
+                }
             await self._account_result(msg, result)
         except (ValueError, TypeError):
-            await msg.reply_text("Invalid arguments. /help or /actions for syntax. No account change was made.")
+            await msg.reply_text(
+                "Invalid arguments. /help or /actions for syntax. No account change was made."
+            )
         except MTProtoUnavailable:
             await msg.reply_text("MTProto is disconnected. /status")
         except Exception as exc:
             log.warning("Direct account command %s failed (%s)", command, type(exc).__name__)
-            await msg.reply_text(f"Telegram action failed: {type(exc).__name__}. No automatic retry; check /status.")
+            await msg.reply_text(
+                f"Telegram action failed: {type(exc).__name__}. No automatic retry; check /status."
+            )
 
     async def _understand_media(self, msg) -> str:
         tg_file = None

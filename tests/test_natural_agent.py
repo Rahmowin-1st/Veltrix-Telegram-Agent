@@ -506,3 +506,33 @@ async def test_welcome_is_natural_language_without_command_catalog():
     reply = u.effective_message.reply_text.call_args.args[0]
     assert "o‘z tilingizda" in reply
     assert "/do" not in reply and "JSON yozishingiz shart emas" in reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_ok", [True, False])
+async def test_readiness_probe_is_synthetic_and_does_not_invoke_account_tools(provider_ok):
+    client = GeminiClient(Settings(_env_file=None, gemini_api_key="dummy"))
+    if provider_ok:
+        client._post = AsyncMock(
+            return_value=response(
+                {"functionCall": {"name": "readiness_ping", "args": {"value": "ready"}}}
+            )
+        )
+    else:
+        client._post = AsyncMock(side_effect=GeminiError("sanitized", 402))
+    assert await client.probe_readiness() is provider_ok
+    assert client.readiness_probe_passed is provider_ok
+    payload = client._post.call_args.args[1]
+    config = payload["toolConfig"]["functionCallingConfig"]
+    assert config == {"mode": "ANY", "allowedFunctionNames": ["readiness_ping"]}
+    assert len(payload["tools"][0]["functionDeclarations"]) == 1
+    assert "Telegram" not in payload["contents"][0]["parts"][0]["text"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_readiness_probe_does_not_accept_plain_http_success_as_tool_readiness():
+    client = GeminiClient(Settings(_env_file=None, gemini_api_key="dummy"))
+    client._post = AsyncMock(return_value=response({"text": "hello"}))
+    assert await client.probe_readiness() is False
+    await client.close()

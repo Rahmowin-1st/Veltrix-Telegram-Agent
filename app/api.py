@@ -21,6 +21,8 @@ async def health(request: Request):
     return {
         "ok": True,
         "gemini": state.settings.has_gemini,
+        "ai_function_call_probe_passed": state.gemini.readiness_probe_passed,
+        "ai_last_http_status": state.gemini.last_http_status,
         "bot_configured": state.settings.has_bot,
         "bot_running": state.telegram.running,
         "bot_mode": state.telegram.mode,

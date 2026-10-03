@@ -383,6 +383,9 @@ class TelegramRuntime:
             status["account_access"] = is_owner and self.writes.mt.ready
             status["ai_note"] = "Configured only; provider availability is not tested by /status"
             status["ai_last_http_status"] = getattr(self.gemini, "last_http_status", None)
+            status["ai_function_call_probe_passed"] = getattr(
+                self.gemini, "readiness_probe_passed", None
+            )
             if is_owner and self.writes.mt.ready:
                 account = await self.writes.mt.me()
                 status["account_id"] = account["id"]

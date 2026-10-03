@@ -30,6 +30,7 @@ class GeminiClient:
         self.settings = settings
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15))
         self.last_http_status: int | None = None
+        self.readiness_probe_passed: bool | None = None
         self._blocked_until = 0.0
         self._blocked_status: int | None = None
 
@@ -75,6 +76,55 @@ class GeminiClient:
         self._blocked_status = None
         self._blocked_until = 0.0
         return response.json()
+
+    async def probe_readiness(self) -> bool:
+        """Synthetic AI function call only; no Telegram data or operations."""
+        if not self.ready:
+            self.readiness_probe_passed = False
+            return False
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": "Call readiness_ping with value ready."}]}
+            ],
+            "tools": [
+                {
+                    "functionDeclarations": [
+                        {
+                            "name": "readiness_ping",
+                            "description": "Synthetic readiness check. No external actions.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {"value": {"type": "STRING"}},
+                                "required": ["value"],
+                            },
+                        }
+                    ]
+                }
+            ],
+            "toolConfig": {
+                "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["readiness_ping"]}
+            },
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 256},
+        }
+        try:
+            data = await self._post(self.settings.gemini_model, payload)
+            self.readiness_probe_passed = any(
+                c["name"] == "readiness_ping" and c["args"] == {"value": "ready"}
+                for c in self.extract_function_calls(data)
+            )
+        except Exception as exc:
+            self.readiness_probe_passed = False
+            log.warning(
+                "AI readiness failed type=%s status=%s",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
+        log.info(
+            "AI readiness function_call=%s status=%s",
+            self.readiness_probe_passed,
+            self.last_http_status,
+        )
+        return self.readiness_probe_passed
 
     async def agent_turn(
         self,

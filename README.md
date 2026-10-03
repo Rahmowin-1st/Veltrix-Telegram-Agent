@@ -94,6 +94,12 @@ working Free Tier key; switching model names cannot repair depleted project-wide
 No automatic paid-provider fallback is configured. Free Tier quotas and free hosting cannot
 guarantee uninterrupted availability. Diagnostic commands remain optional, not the main workflow.
 
+At startup, a background synthetic `readiness_ping` function-call probe checks the configured AI
+provider without Telegram messages, account data, or mutations. `/healthz` reports its result
+separately from credential configuration, including null while untested/in progress. Disable with
+AI_STARTUP_CHECK=false if needed. This one small request uses the configured provider's quota and
+does not prove every account tool works end to end.
+
 ## Optional diagnostic commands
 /start, /help, /status, /whoami, /tools, /memory on|off|status, /forget, /confirm TOKEN, /cancel
 

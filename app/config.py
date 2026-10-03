@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.8-flash"
     gemini_search_model: str = "gemini-3.8-flash"
+    ai_startup_check: bool = True
 
     telegram_bot_token: str | None = None
     telegram_api_id: int | None = None

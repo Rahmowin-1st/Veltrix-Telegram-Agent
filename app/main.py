@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from fastapi import FastAPI
@@ -55,6 +56,11 @@ async def lifespan(app: FastAPI):
     runtime = build_runtime()
     app.state.runtime = runtime
     await runtime.db.init()
+    ai_probe = (
+        asyncio.create_task(runtime.gemini.probe_readiness())
+        if runtime.settings.ai_startup_check and runtime.gemini.ready
+        else None
+    )
     try:
         await runtime.mtproto.start()
     except Exception:
@@ -64,6 +70,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("Bot startup failed; health server will remain available")
     yield
+    if ai_probe:
+        ai_probe.cancel()
+        with suppress(asyncio.CancelledError):
+            await ai_probe
     await runtime.telegram.stop()
     await runtime.mtproto.stop()
     await runtime.gemini.close()

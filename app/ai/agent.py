@@ -156,7 +156,10 @@ class Agent:
         self, *, chat_id: int, text: str, allow_account_tools: bool, message_id: int | None = None
     ) -> str:
         if not self.gemini.ready:
-            return "Gemini API hali sozlanmagan. /status orqali ko‘ring."
+            return (
+                "AI ulanishi hali sozlanmagan. Buyruq yozishingiz kerak emas; "
+                "ulanish tiklangach, men bilan oddiy gap orqali ishlaysiz."
+            )
 
         history = await self.db.get_history(chat_id, self.settings.max_history_messages)
         contents: list[dict[str, Any]] = []

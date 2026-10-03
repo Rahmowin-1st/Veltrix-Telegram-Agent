@@ -454,3 +454,55 @@ async def test_confirmation_reply_failure_never_reexecutes_or_claims_action_fail
     assert query.edit_message_text.call_args.args[0] == "Tasdiqlangan amal bajarildi."
     await obj._confirmation_callback(query)
     obj.writes.execute_confirmed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_billing_failure_circuit_does_not_keep_calling_provider(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("app.ai.gemini_client.time.monotonic", lambda: now[0])
+    client = GeminiClient(Settings(_env_file=None, gemini_api_key="dummy"))
+    await client.client.aclose()
+    requests = []
+
+    def provider(request):
+        requests.append(request)
+        return (
+            httpx.Response(402, text="PRIVATE")
+            if len(requests) == 1
+            else httpx.Response(200, json={"ok": True})
+        )
+
+    client.client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+    for _ in range(2):
+        with pytest.raises(GeminiError) as error:
+            await client._post("test", {})
+        assert error.value.status_code == 402
+    assert len(requests) == 1
+    now[0] = 161.0
+    assert await client._post("test", {}) == {"ok": True}
+    assert len(requests) == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [402, 401, 429, 503])
+async def test_ai_failure_never_redirects_user_to_manual_commands(status):
+    obj, _ = runtime()
+    obj.agent.chat = AsyncMock(side_effect=GeminiError("sanitized", status))
+    obj.writes.execute_confirmed = AsyncMock()
+    u = update("Admin musiqasini Savedga saqla")
+    await obj.handle_update(u, None)
+    reply = u.effective_message.reply_text.call_args.args[0]
+    assert "Buyruq yozishingiz kerak emas" in reply
+    assert not any(command in reply for command in ["/do", "/account", "/chats", "/status"])
+    obj.writes.execute_confirmed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_welcome_is_natural_language_without_command_catalog():
+    obj, _ = runtime()
+    u = update("/start")
+    await obj.handle_update(u, None)
+    reply = u.effective_message.reply_text.call_args.args[0]
+    assert "o‘z tilingizda" in reply
+    assert "/do" not in reply and "JSON yozishingiz shart emas" in reply

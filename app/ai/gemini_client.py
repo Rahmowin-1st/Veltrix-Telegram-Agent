@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -29,6 +30,8 @@ class GeminiClient:
         self.settings = settings
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15))
         self.last_http_status: int | None = None
+        self._blocked_until = 0.0
+        self._blocked_status: int | None = None
 
     @property
     def ready(self) -> bool:
@@ -49,10 +52,17 @@ class GeminiClient:
         reraise=True,
     )
     async def _post(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if time.monotonic() < self._blocked_until:
+            raise GeminiError("AI configuration temporarily blocked", self._blocked_status)
         url = f"{self.BASE_URL}/{model}:generateContent"
         response = await self.client.post(url, headers=self._headers(), json=payload)
         self.last_http_status = response.status_code
         if response.status_code >= 400:
+            if response.status_code in {401, 402, 403}:
+                # A billing/key failure is project-wide. Never spend retries or
+                # silently switch to a paid service/model to bypass it.
+                self._blocked_until = time.monotonic() + 60
+                self._blocked_status = response.status_code
             # Provider error bodies may contain request details. Do not echo or log them.
             error = (
                 GeminiTransientError
@@ -62,6 +72,8 @@ class GeminiClient:
             raise error(
                 f"AI provider HTTP {response.status_code}", status_code=response.status_code
             )
+        self._blocked_status = None
+        self._blocked_until = 0.0
         return response.json()
 
     async def agent_turn(

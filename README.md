@@ -87,6 +87,13 @@ The user client identifies itself as `Veltrix Telegram Agent`; the local login h
 `Veltrix Session Setup`. Render deployments in Frankfurt can appear as Germany in Telegram devices.
 Location alone does not prove a session is trusted. Revoked sessions are not silently logged in again.
 
+Ordinary users are not redirected to manual commands when AI fails. Billing/key failures are
+reported honestly without claiming completion; a 60-second circuit breaker avoids repeatedly
+calling a blocked project. HTTP 402 requires fixing project billing or configuring an authorized
+working Free Tier key; switching model names cannot repair depleted project-wide credit.
+No automatic paid-provider fallback is configured. Free Tier quotas and free hosting cannot
+guarantee uninterrupted availability. Diagnostic commands remain optional, not the main workflow.
+
 ## Optional diagnostic commands
 /start, /help, /status, /whoami, /tools, /memory on|off|status, /forget, /confirm TOKEN, /cancel
 

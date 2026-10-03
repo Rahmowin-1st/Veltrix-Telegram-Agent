@@ -28,28 +28,16 @@ log = logging.getLogger(__name__)
 
 HELP_TEXT = """Veltrix Telegram Agent
 
-Oddiy gap bilan topshiriq bering: “Admin yuborgan oxirgi musiqani Savedga saqla va music teg qo‘y”.
-Kontakt/chat topish, media, reaksiyalar, kanal va stiker amallari AI function calling orqali ichkarida bajariladi.
-Xavfli amallar uchun Tasdiqlash tugmasi chiqadi yoki “tasdiqlayman” deb yozishingiz mumkin.
-Quyidagi buyruqlar faqat qo‘shimcha diagnostika/manual yo‘l:
+Men bilan o‘z tilingizda yozishing. Buyruq yoki JSON yozishingiz shart emas — kerakli amallarni o‘zim tanlayman.
 
-/start - start
-/status - setup + connection status
-/whoami - show your Telegram ID and owner status
-/tools - capabilities
-/account - connected account identity (owner private chat)
-/chats [limit] - recent chats, without AI
-/messages PEER [limit] - recent messages; PEER can be me, @username or numeric ID
-/search QUERY - global message search, without AI
-/contacts [limit] - contacts, without AI
-/do ACTION JSON - preview an account change, then /confirm TOKEN
-/actions - action names and examples
-/memory [on|off|status] - per-chat AI memory
-/forget - clear this chat's AI memory
-/confirm TOKEN - confirm protected action
-/cancel - cancel pending protected actions
+Masalan:
+• “Admin yuborgan oxirgi musiqani Savedga saqla va music teg qo‘y.”
+• “Adminni top, unga Salom deb yubor.”
+• “Shu xabarimga 👍 bos.”
+• “Haftalik kreativ kontent reja tuz.”
 
-Write normally for AI + live web research. Owner-only MTProto account tools activate only for OWNER_TELEGRAM_ID.
+Kim nazarda tutilgani noaniq bo‘lsa, aniqlashtiraman. Muhim o‘zgarishlarda Tasdiqlash tugmasi chiqadi.
+Shaxsiy akkaunt amallaridan faqat egasi shaxsiy suhbatda foydalanadi.
 """.strip()
 
 TOOLS_TEXT = """Main tools:
@@ -330,17 +318,27 @@ class TelegramRuntime:
             )
         except GeminiError as exc:
             log.warning("AI provider unavailable status=%s", exc.status_code)
+            reason = (
+                "AI ulanishi loyiha billing/kredit holati sabab bloklangan. "
+                if exc.status_code == 402
+                else "AI ulanishi kalit yoki ruxsat sabab bloklangan. "
+                if exc.status_code in {401, 403}
+                else "AI hozir band yoki vaqtincha javob bermayapti. "
+            )
             await self._reply(
                 update,
-                "AI xizmati hozir javob bermadi. Men bu topshiriq bajarildi deb aytmayman. "
-                "Account ulanishi alohida ishlayapti; AI sozlamasi/kvotasi tekshirilishi kerak.",
+                reason + "Buyruq yozishingiz kerak emas. Bu vazifa to‘liq bajarilganini "
+                "tasdiqlay olmayman; amallarni avtomatik takrorlamayman. "
+                "Ulanish tiklangach, yana oddiy gap bilan yozishingiz mumkin.",
                 business_connection_id,
             )
         except Exception:
             log.exception("Update handling failed")
             try:
                 await self._reply(
-                    update, "Ichki xatolik yuz berdi. /status orqali holatni tekshiring."
+                    update,
+                    "Ichki xatolik yuz berdi. Vazifa yakunlangani tasdiqlanmadi. "
+                    "Buyruq yozishingiz shart emas; amallar avtomatik takrorlanmadi.",
                 )
             except Exception:
                 pass

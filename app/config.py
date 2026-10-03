@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     max_agent_steps: int = Field(default=12, ge=1, le=16)
     write_rate_per_minute: int = Field(default=20, ge=1, le=120)
     download_max_mb: int = Field(default=25, ge=1, le=100)
+    webhook_queue_size: int = Field(default=100, ge=10, le=1000)
+    webhook_max_bytes: int = Field(default=262144, ge=16384, le=1048576)
+    ai_turn_timeout_seconds: float = Field(default=120, ge=10, le=300)
+    max_tool_calls_per_turn: int = Field(default=40, ge=1, le=80)
+    memory_retention_messages: int = Field(default=200, ge=20, le=2000)
     allowed_fetch_schemes: str = "https"
 
     @field_validator(

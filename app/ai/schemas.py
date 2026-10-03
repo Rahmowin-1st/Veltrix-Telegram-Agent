@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from app.ai.chat_schemas import CHAT_DECLARATIONS
 from app.ai.extended_schemas import EXTENDED_DECLARATIONS
 
-TOOL_DECLARATIONS = [
+TOOL_DECLARATIONS = CHAT_DECLARATIONS + [
     {
         "name": "account_info",
         "description": "Get the owner's current Telegram account/profile info via MTProto.",

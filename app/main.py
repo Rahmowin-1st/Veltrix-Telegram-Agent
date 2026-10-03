@@ -63,12 +63,12 @@ async def lifespan(app: FastAPI):
     )
     try:
         await runtime.mtproto.start()
-    except Exception:
-        log.exception("MTProto startup failed; continuing in reduced mode")
+    except Exception as exc:
+        log.warning("MTProto startup failed (%s); continuing in reduced mode", type(exc).__name__)
     try:
         await runtime.telegram.start()
-    except Exception:
-        log.exception("Bot startup failed; health server will remain available")
+    except Exception as exc:
+        log.warning("Bot startup failed (%s); health server will remain available", type(exc).__name__)
     yield
     if ai_probe:
         ai_probe.cancel()

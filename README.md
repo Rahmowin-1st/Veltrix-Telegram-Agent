@@ -14,8 +14,8 @@ Personal Telegram AI agent with two access layers:
 - Send/edit/forward/pin/read/archive/mute
 - Protected block/unblock and owner profile changes
 - Per-chat wallpaper through MTProto where the Telegram schema supports it
-- Per-chat memory with /memory and /forget
-- High-impact actions protected by /confirm
+- Per-chat memory through natural-language AI controls
+- High-impact actions protected by confirmation buttons or “tasdiqlayman”
 
 ## Access matrix
 | Capability | Bot | Business | MTProto |
@@ -100,6 +100,41 @@ separately from credential configuration, including null while untested/in progr
 AI_STARTUP_CHECK=false if needed. This one small request uses the configured provider's quota and
 does not prove every account tool works end to end.
 
+All 34 account mutation actions and the read tools are available to the AI. Conversation controls
+are also function calls: “Nimalar qila olasan?”, “AI va akkaunt ulanish holatini ayt”, “Xotirani
+o‘chir/yoq”, “Suhbatimizni unut”, and “Kutilayotgan amallarni bekor qil”. Memory/cancellation
+tools are bound to the current private chat server-side; the model cannot specify someone else's
+chat or confirm its own protected actions. Forgetting does not silently re-add the just-deleted turn.
+Replies include the text of a quoted Bot API message as untrusted data; these references are never
+treated as user-session MTProto message IDs. Bot-chat media forwarding is not implied by that text support.
+
+### Bounded backend processing
+
+- Webhooks enter a bounded 100-update queue and acknowledge without waiting for the AI.
+- Queue overload returns HTTP 503 for Telegram delivery retry; malformed JSON returns 400 and
+  requests over 256 KiB return 413. Secret header verification precedes body processing.
+- Dispatch commits a bot-scoped update receipt before any tool work. Duplicate updates are skipped;
+  receipt metadata contains no message text or secrets and expires after seven days.
+- Same-chat processing is serialized, edits do not trigger another account action, and lock entries
+  are released after use. AI turns are limited to 120 seconds, 40 tool calls and the configured step limit.
+- Tool results and history are bounded; the most recent 200 memory entries per chat are retained.
+  Media size metadata is checked before download, and the downloaded size is checked again.
+- Pending confirmations are chat-bound, single-use, five-minute previews, capped at five per chat
+  and 100 total. Identical previews reuse the token without extending expiry. Buttons are shown again
+  if the same preview is requested, including when the provider fails after creating a preview.
+- Bounded, redacted action receipts are kept in enabled chat memory before the next AI response,
+  including separately confirmed outcomes. This helps the AI continue after provider/reply failure
+  without sending or forwarding the same item again; it is not a new authorization or a guarantee.
+- An unknown/partial mutation outcome is never automatically replayed. Queue acknowledgement,
+  DB receipts and remote Telegram effects are **not one atomic transaction**: a process crash can
+  lose a queued task, and this is not an exactly-once or durable-background-jobs guarantee.
+  SQLite/receipt memory can reset on a free Render redeploy. Use an authorized persistent Postgres
+  and durable worker architecture for stronger cross-deploy/job guarantees; these are not provisioned here.
+
+Limits are configurable through WEBHOOK_QUEUE_SIZE, WEBHOOK_MAX_BYTES, AI_TURN_TIMEOUT_SECONDS,
+MAX_TOOL_CALLS_PER_TURN and MEMORY_RETENTION_MESSAGES. This deployment uses one application process;
+in-process chat locks/confirmations are not a distributed multi-worker coordination system.
+
 ## Optional diagnostic commands
 /start, /help, /status, /whoami, /tools, /memory on|off|status, /forget, /confirm TOKEN, /cancel
 
@@ -109,7 +144,7 @@ Account commands work only in the configured owner's **private bot chat**, witho
 - `/messages PEER [limit]`: recent messages; `me`, `@username`, or numeric chat ID.
 - `/search QUERY`: global account message search (20 results).
 - `/contacts [limit]`: contacts (1–100).
-- `/actions`: available mutation names and examples.
+- `/actions`: natural-language capability help (no manual JSON instructions).
 - `/do ACTION JSON`: preview a change; **all direct mutations** need a separate `/confirm TOKEN`.
 
 Example: `/do send_message {"peer":"me","text":"Hello"}` previews a Saved Messages send.

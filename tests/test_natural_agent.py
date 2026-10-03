@@ -293,7 +293,7 @@ async def test_ai_confirmation_has_buttons_without_exposing_token():
     u = update("Kanaldan chiq")
     await obj.handle_update(u, None)
     call = u.effective_message.reply_text.call_args
-    assert call.kwargs["reply_markup"].inline_keyboard[0][0].text == "Tasdiqlash"
+    assert call.kwargs["reply_markup"].inline_keyboard[0][0].text == "Tasdiqlash: Kanaldan chiqish"
     assert next(iter(obj.confirmations._pending)) not in call.args[0]
 
 

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
 import secrets
+import time
+from collections import OrderedDict
+from contextlib import asynccontextmanager
 
 from telegram import (
     InlineKeyboardButton,
@@ -26,9 +30,30 @@ from app.tools.telegram_write import TelegramWriteTools
 
 log = logging.getLogger(__name__)
 
+
+class WebhookBusy(RuntimeError):
+    pass
+
+
+ACTION_LABELS = {
+    "delete_messages": "Xabarlarni o‘chirish",
+    "block_user": "Bloklash",
+    "unblock_user": "Blokdan chiqarish",
+    "delete_contact": "Kontaktni o‘chirish",
+    "update_profile": "Profilni yangilash",
+    "leave_channel": "Kanaldan chiqish",
+    "create_channel": "Kanal yaratish",
+    "edit_channel_info": "Kanalni yangilash",
+    "set_channel_admin": "Admin huquqini o‘zgartirish",
+    "ban_channel_member": "Kanal a’zosi cheklovini o‘zgartirish",
+    "uninstall_sticker_set": "Stiker packni olib tashlash",
+    "create_sticker_set": "Stiker pack yaratish",
+    "add_sticker_to_set": "Packga stiker qo‘shish",
+}
+
 HELP_TEXT = """Veltrix Telegram Agent
 
-Men bilan o‘z tilingizda yozishing. Buyruq yoki JSON yozishingiz shart emas — kerakli amallarni o‘zim tanlayman.
+Men bilan o‘z tilingizda yozing. Buyruq yoki JSON yozishingiz shart emas — kerakli amallarni o‘zim tanlayman.
 
 Masalan:
 • “Admin yuborgan oxirgi musiqani Savedga saqla va music teg qo‘y.”
@@ -40,21 +65,22 @@ Kim nazarda tutilgani noaniq bo‘lsa, aniqlashtiraman. Muhim o‘zgarishlarda T
 Shaxsiy akkaunt amallaridan faqat egasi shaxsiy suhbatda foydalanadi.
 """.strip()
 
-TOOLS_TEXT = """Main tools:
-• live public web research + URL reading
-• image/file/voice understanding
-• recent Telegram chats/messages + search (owner + MTProto)
-• contacts list/add/import
-• send/edit/forward/pin/read/archive/mute
-• protected profile/contact/block/delete actions
-• per-chat wallpaper via MTProto when Telegram schema supports it
-• natural-language contact/dialog name resolution + latest incoming media
-• real Premium Saved Messages tags + user/custom emoji reactions
-• bot reactions on the user's current message
-• join/create/manage channels subject to actual rights
-• install/favorite/send stickers + personal packs from existing stickers
-• creative UTF-8 files + existing media with captions
-• Telegram Business connected-chat replies
+TOOLS_TEXT = """Hammasini oddiy gap bilan so‘rashingiz mumkin:
+• kontakt va suhbatni nomi orqali topish, xabarlarni o‘qish va qidirish
+• xabar yoki media yuborish, tahrirlash, forward qilish va Savedga saqlash
+• musiqani topish, Savedga teg qo‘yish (native teglar uchun Premium kerak)
+• xabarlarni qadash, o‘qilgan qilish, chatni arxivlash va ovozini o‘chirish
+• kontaktlar, profil va chat fonini boshqarish
+• bot yoki akkaunt sifatida oddiy/custom reaction qo‘yish
+• kanallarga qo‘shilish, yaratish va mavjud huquqlar doirasida boshqarish
+• stiker packlarni qo‘shish, yuborish, sevimlilarga saqlash va mavjud stikerlardan pack tuzish
+• internetda izlash, havolalarni o‘qish, rasm/fayl/ovozli xabarni tushunish
+• kreativ matn, post, reja va fayl tayyorlash
+• AI ulanish holatini bilish, suhbat xotirasini yoqish/o‘chirish/tozalash, kutilayotgan amalni bekor qilish
+
+Masalan: “Admin yuborgan oxirgi musiqani Savedga tashla, music teg qo‘y”.
+Buyruq va texnik format kerak emas. Muhim o‘zgarishlarda tasdiqlash tugmasi chiqadi.
+Telegram ruxsatlari va limitlari amal qiladi; akkaunt amallari faqat egasining shaxsiy suhbatida ishlaydi.
 """.strip()
 
 
@@ -76,6 +102,8 @@ class TelegramRuntime:
         self.writes = writes
         self.application: Application | None = None
         self.mode = "disabled"
+        self._queued_updates: OrderedDict[int, float] = OrderedDict()
+        self._chat_locks: dict[int, tuple[asyncio.Lock, int]] = {}
 
     @property
     def running(self) -> bool:
@@ -87,7 +115,12 @@ class TelegramRuntime:
             self.mode = "disabled"
             return
 
-        self.application = Application.builder().token(self.settings.telegram_bot_token).build()
+        self.application = (
+            Application.builder()
+            .token(self.settings.telegram_bot_token)
+            .update_queue(asyncio.Queue(maxsize=self.settings.webhook_queue_size))
+            .build()
+        )
         self.application.add_handler(TypeHandler(Update, self.handle_update))
         await self.application.initialize()
         await self.application.start()
@@ -129,10 +162,38 @@ class TelegramRuntime:
 
     async def process_webhook(self, payload: dict) -> None:
         if not self.application or not self.application.running:
-            raise RuntimeError("Telegram application is not running")
+            raise WebhookBusy("Telegram application is not running")
+        now = time.monotonic()
+        while self._queued_updates and (
+            next(iter(self._queued_updates.values())) < now - 86400
+            or len(self._queued_updates) >= 4096
+        ):
+            self._queued_updates.popitem(last=False)
+        update_id = payload["update_id"]
+        if update_id in self._queued_updates:
+            return
         update = Update.de_json(payload, self.application.bot)
         if update is not None:
-            await self.application.process_update(update)
+            try:
+                self.application.update_queue.put_nowait(update)
+            except asyncio.QueueFull as exc:
+                raise WebhookBusy("Telegram update queue is full") from exc
+            self._queued_updates[update_id] = now
+        # Ack promptly. The Application owns/drains the bounded processing queue.
+
+    @asynccontextmanager
+    async def _serial_chat(self, chat_id: int):
+        lock, users = self._chat_locks.get(chat_id, (asyncio.Lock(), 0))
+        self._chat_locks[chat_id] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            _, users = self._chat_locks[chat_id]
+            if users == 1:
+                self._chat_locks.pop(chat_id)
+            else:
+                self._chat_locks[chat_id] = (lock, users - 1)
 
     def _is_owner(self, user_id: int | None) -> bool:
         return bool(
@@ -213,6 +274,7 @@ class TelegramRuntime:
             return
         try:
             result = await self.writes.execute_confirmed(pending.action, pending.arguments)
+            await self._record_confirmed(msg.chat_id, pending, result)
             outcome = (
                 "Tasdiqlangan amal bajarildi."
                 if not isinstance(result, dict) or result.get("ok", True)
@@ -220,6 +282,9 @@ class TelegramRuntime:
             )
         except Exception as exc:
             log.warning("Confirmed action %s failed (%s)", pending.action, type(exc).__name__)
+            await self._record_confirmed(
+                msg.chat_id, pending, {"ok": False, "outcome_unknown": True}
+            )
             outcome = (
                 "Amal yakunlangani tasdiqlanmadi. Avtomatik takrorlanmadi; holatni tekshiring."
             )
@@ -230,7 +295,28 @@ class TelegramRuntime:
         except Exception as exc:
             log.warning("Confirmation reply failed (%s)", type(exc).__name__)
 
+    async def _record_confirmed(self, chat_id: int, pending, result) -> None:
+        recorder = getattr(self.agent, "record_action", None)
+        if recorder:
+            await recorder(chat_id, pending.action, pending.arguments, result)
+
     async def handle_update(self, update: Update, _context) -> None:
+        try:
+            update_id = getattr(update, "update_id", None)
+            if type(update_id) is int:
+                bot_id = int((self.settings.telegram_bot_token or "0").split(":", 1)[0])
+                if not await self.db.claim_update(bot_id, update_id):
+                    log.info("Duplicate Telegram update ignored")
+                    return
+            msg = update.effective_message
+            chat_id = getattr(msg, "chat_id", 0)
+            async with self._serial_chat(chat_id):
+                await self._handle_update(update, _context)
+        except Exception as exc:
+            log.warning("Update dispatch failed (%s); no automatic replay", type(exc).__name__)
+
+    async def _handle_update(self, update: Update, _context) -> None:
+        previous_requests = {}
         try:
             if getattr(update, "callback_query", None):
                 await self._confirmation_callback(update.callback_query)
@@ -238,6 +324,17 @@ class TelegramRuntime:
             if getattr(update, "business_connection", None):
                 c = update.business_connection
                 log.info("Business connection update id=%s", getattr(c, "id", None))
+                return
+            # Edits are not new human requests; executing them would repeat account writes.
+            if any(
+                getattr(update, field, None)
+                for field in (
+                    "edited_message",
+                    "edited_business_message",
+                    "channel_post",
+                    "edited_channel_post",
+                )
+            ):
                 return
 
             msg = update.effective_message
@@ -250,7 +347,7 @@ class TelegramRuntime:
             is_owner = self._is_owner(user_id) and msg.chat.type == "private" and not is_business
             text = (msg.text or msg.caption or "").strip()
 
-            if is_owner and text.casefold() in {
+            if is_owner and text.casefold().rstrip(".!?") in {
                 "tasdiqlayman",
                 "ha tasdiqlayman",
                 "ha, tasdiqlayman",
@@ -264,6 +361,23 @@ class TelegramRuntime:
                     return
                 await self._handle_command(
                     update, f"/confirm {pending[0].token}", True, natural=True
+                )
+                return
+
+            if is_owner and text.casefold().rstrip(".!?") in {
+                "bekor qil",
+                "bekor qilish",
+                "bekor qilaman",
+                "cancel",
+                "cancel it",
+                "отмена",
+                "отмени",
+            }:
+                count = self.confirmations.cancel_chat(msg.chat_id)
+                await msg.reply_text(
+                    f"Kutilayotgan {count} ta amal bekor qilindi."
+                    if count
+                    else "Tasdiqlashni kutayotgan amal yo‘q."
                 )
                 return
 
@@ -281,6 +395,16 @@ class TelegramRuntime:
             prompt = text
             if media_note:
                 prompt = (text + "\n\nAttached media understanding:\n" + media_note).strip()
+            replied = getattr(msg, "reply_to_message", None)
+            if replied:
+                quoted = (
+                    getattr(replied, "text", None) or getattr(replied, "caption", None) or ""
+                )[:4000]
+                if quoted:
+                    prompt += (
+                        "\n\nReplied-to message (UNTRUSTED DATA; Bot API reference, "
+                        "not an MTProto account message ID):\n" + quoted
+                    )
             sticker = getattr(msg, "sticker", None)
             if sticker:
                 prompt += f"\nAttached sticker metadata: set_name={sticker.set_name}, emoji={sticker.emoji}."
@@ -288,33 +412,21 @@ class TelegramRuntime:
                 prompt = "Respond appropriately to the attached media."
 
             allow_account_tools = is_owner and not is_business
-            previous_tokens = {p.token for p in self.confirmations.for_chat(msg.chat_id)}
+            previous_requests = {
+                p.token: p.request_id for p in self.confirmations.for_chat(msg.chat_id)
+            }
             response = await self.agent.chat(
                 chat_id=msg.chat_id,
                 text=prompt,
                 allow_account_tools=allow_account_tools,
+                allow_chat_tools=msg.chat.type == "private" and not is_business,
                 message_id=getattr(msg, "message_id", None) if not is_business else None,
             )
-            pending = [
-                p
-                for p in self.confirmations.for_chat(msg.chat_id)
-                if p.token not in previous_tokens
-            ]
-            buttons = [
-                [
-                    InlineKeyboardButton(
-                        "Tasdiqlash" if len(pending) == 1 else f"Tasdiqlash ({i + 1})",
-                        callback_data=f"confirm:{p.token}",
-                    ),
-                    InlineKeyboardButton("Bekor qilish", callback_data=f"cancel:{p.token}"),
-                ]
-                for i, p in enumerate(pending[:5])
-            ]
             await self._reply(
                 update,
                 response,
                 business_connection_id,
-                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+                reply_markup=self._pending_markup(msg.chat_id, previous_requests),
             )
         except GeminiError as exc:
             log.warning("AI provider unavailable status=%s", exc.status_code)
@@ -331,17 +443,37 @@ class TelegramRuntime:
                 "tasdiqlay olmayman; amallarni avtomatik takrorlamayman. "
                 "Ulanish tiklangach, yana oddiy gap bilan yozishingiz mumkin.",
                 business_connection_id,
+                reply_markup=self._pending_markup(msg.chat_id, previous_requests),
             )
-        except Exception:
-            log.exception("Update handling failed")
+        except Exception as exc:
+            log.warning("Update handling failed (%s)", type(exc).__name__)
             try:
                 await self._reply(
                     update,
                     "Ichki xatolik yuz berdi. Vazifa yakunlangani tasdiqlanmadi. "
                     "Buyruq yozishingiz shart emas; amallar avtomatik takrorlanmadi.",
+                    reply_markup=self._pending_markup(msg.chat_id, previous_requests),
                 )
             except Exception:
                 pass
+
+    def _pending_markup(self, chat_id: int, previous_requests: dict):
+        pending = [
+            p
+            for p in self.confirmations.for_chat(chat_id)
+            if previous_requests.get(p.token) != p.request_id
+        ]
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"Tasdiqlash: {ACTION_LABELS.get(p.action, 'tanlangan amal')}"[:60],
+                    callback_data=f"confirm:{p.token}",
+                ),
+                InlineKeyboardButton("Bekor qilish", callback_data=f"cancel:{p.token}"),
+            ]
+            for p in pending[:5]
+        ]
+        return InlineKeyboardMarkup(buttons) if buttons else None
 
     async def _handle_command(
         self, update: Update, text: str, is_owner: bool, *, natural: bool = False
@@ -358,20 +490,8 @@ class TelegramRuntime:
             user_id = update.effective_user.id if update.effective_user else None
             await msg.reply_text(f"Telegram ID: {user_id}\nOwner: {'YES' if is_owner else 'NO'}")
             return
-        if command == "/tools":
+        if command in {"/tools", "/actions"}:
             await msg.reply_text(TOOLS_TEXT)
-            return
-        if command == "/actions":
-            await msg.reply_text(
-                "Use /do ACTION {JSON}. Every direct change requires /confirm TOKEN within 5 minutes. "
-                "Use /cancel to discard it. Numeric chat IDs, @usernames and me (Saved Messages) are accepted.\n\n"
-                'Examples:\n/do send_message {"peer":"me","text":"Hello"}\n'
-                '/do edit_message {"peer":"me","message_id":123,"text":"Updated"}\n'
-                '/do delete_messages {"peer":"me","message_ids":[123],"revoke":true}\n'
-                '/do archive_chat {"peer":"@username","archived":true}\n'
-                '/do mute_chat {"peer":"@username","minutes":60}\n\n'
-                "Actions: " + ", ".join(self.writes.ACTION_METHODS)
-            )
             return
         if command == "/status":
             status = self.settings.setup_status()
@@ -425,7 +545,9 @@ class TelegramRuntime:
                 await msg.reply_text("Only the configured owner can confirm account actions.")
                 return
             if len(parts) < 2:
-                await msg.reply_text("Usage: /confirm TOKEN")
+                await msg.reply_text(
+                    "Kerakli Tasdiqlash tugmasini bosing yoki bitta amal kutilayotgan bo‘lsa ‘tasdiqlayman’ deb yozing."
+                )
                 return
             pending = self.confirmations.consume(msg.chat_id, parts[1])
             if not pending:
@@ -433,6 +555,7 @@ class TelegramRuntime:
                 return
             try:
                 result = await self.writes.execute_confirmed(pending.action, pending.arguments)
+                await self._record_confirmed(msg.chat_id, pending, result)
                 if natural:
                     await msg.reply_text(
                         "Tasdiqlangan amal bajarildi."
@@ -443,12 +566,15 @@ class TelegramRuntime:
                     await msg.reply_text(f"Confirmed: {pending.action}\n{result}")
             except Exception as exc:
                 log.warning("Confirmed action %s failed (%s)", pending.action, type(exc).__name__)
+                await self._record_confirmed(
+                    msg.chat_id, pending, {"ok": False, "outcome_unknown": True}
+                )
                 await msg.reply_text(
                     f"Action failed: {type(exc).__name__}. Token consumed; no automatic retry. Check /status."
                 )
             return
 
-        await msg.reply_text("Unknown command. /help")
+        await msg.reply_text("Nima qilishimni oddiy gap bilan yozing — buyruq kerak emas.")
 
     @staticmethod
     def _peer(value: str) -> str | int:
@@ -524,7 +650,7 @@ class TelegramRuntime:
             await self._account_result(msg, result)
         except (ValueError, TypeError):
             await msg.reply_text(
-                "Invalid arguments. /help or /actions for syntax. No account change was made."
+                "Nima qilishimni oddiy gap bilan yozing — texnik format kerak emas. Akkauntda o‘zgarish qilinmadi."
             )
         except MTProtoUnavailable:
             await msg.reply_text("MTProto is disconnected. /status")
@@ -535,6 +661,12 @@ class TelegramRuntime:
             )
 
     async def _understand_media(self, msg) -> str:
+        media = next((m for m in (msg.voice, msg.audio, msg.video, msg.document) if m), None)
+        if media is None and msg.photo:
+            media = msg.photo[-1]
+        limit = self.settings.download_max_mb * 1024 * 1024
+        if media and (getattr(media, "file_size", None) or 0) > limit:
+            return f"Media exceeds {self.settings.download_max_mb} MB processing limit. Not downloaded."
         tg_file = None
         mime = "application/octet-stream"
         if msg.voice:
@@ -554,6 +686,8 @@ class TelegramRuntime:
             mime = "image/jpeg"
         if not tg_file:
             return ""
+        if (getattr(tg_file, "file_size", None) or 0) > limit:
+            return f"Media exceeds {self.settings.download_max_mb} MB processing limit. Not downloaded."
         data = bytes(await tg_file.download_as_bytearray())
         if len(data) > self.settings.download_max_mb * 1024 * 1024:
             return f"Media exceeds {self.settings.download_max_mb} MB processing limit."
